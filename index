@@ -76,10 +76,18 @@ $('dbfile').onchange = async e => {
   setStatus('Вопросов в базе: ' + DB.length);
 };
 
-try {
-  const saved = localStorage.getItem('pdd_db');
-  if (saved) { prepareDB(JSON.parse(saved)); setStatus('Вопросов в базе: ' + DB.length); }
-} catch (e) {}
+(async () => {
+  try {
+    const saved = localStorage.getItem('pdd_db');
+    if (saved) { prepareDB(JSON.parse(saved)); setStatus('Вопросов в базе: ' + DB.length); return; }
+  } catch (e) {}
+  // автозагрузка questions.json, лежащего рядом со страницей
+  try {
+    const r = await fetch('questions.json');
+    prepareDB(await r.json());
+    setStatus('Вопросов в базе: ' + DB.length);
+  } catch (e) { setStatus('Базу не удалось загрузить, выбери questions.json вручную'); }
+})();
 
 async function loop() {
   const video = $('video'), canvas = $('canvas');
