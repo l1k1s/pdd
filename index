@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ПДД сканер</title>
+<style>
+  body { font-family: sans-serif; margin: 8px; background: #111; color: #eee; }
+  video { width: 100%; max-height: 40vh; background: #000; }
+  button, input { font-size: 16px; margin: 4px 0; }
+  #answer { font-size: 22px; font-weight: bold; color: #7CFC7C; margin: 8px 0; min-height: 3em; }
+  #q { font-size: 14px; color: #bbb; }
+  #status { font-size: 12px; color: #888; }
+</style>
+</head>
+<body>
+<input type="file" id="dbfile" accept=".json">
+<button id="start">Старт камеры</button>
+<div id="status">База не загружена</div>
+<video id="video" playsinline muted></video>
+<div id="answer"></div>
+<div id="q"></div>
+<canvas id="canvas" style="display:none"></canvas>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+<script>
+// Формат базы: [{"question":"...","answers":["...","..."],"correct":0}, ...]
+// correct — индекс правильного ответа (с нуля)
+let DB = [];
+let worker = null;
+let busy = false;
+
+const $ = id => document.getElementById(id);
+const setStatus = t => $('status').textContent = t;
+
+function tokens(s) {
+  return s.toLowerCase().replace(/ё/g, 'е').replace(/[^а-яa-z0-9 ]/g, ' ')
+    .split(/\s+/).filter(w => w.length > 3);
+}
+
+function prepareDB(raw) {
+  DB = raw.map(item => ({
+    ...item,
+    set: new Set(tokens(item.question + ' ' + item.answers.join(' ')))
+  }));
+}
+
+function findBest(ocrText) {
+  const ocr = new Set(tokens(ocrText));
+  if (ocr.size < 3) return null;
+  const scored = [];
+  for (const item of DB) {
+    let hit = 0;
+    for (const w of ocr) if (item.set.has(w)) hit++;
+    const score = hit / Math.sqrt(ocr.size * item.set.size);
+    if (score > 0.35) scored.push({ item, score });
+  }
+  if (!scored.length) return null;
+  scored.sort((a, b) => b.score - a.score);
+  // все, кто почти так же похож, как лучший (одинаковый текст, разные картинки)
+  const top = scored.filter(x => x.score >= scored[0].score - 0.02);
+  // убираем повторы с одним и тем же правильным ответом
+  const seen = new Set(), uniq = [];
+  for (const x of top) {
+    const a = x.item.answers[x.item.correct];
+    if (!seen.has(a)) { seen.add(a); uniq.push(x); }
+  }
+  return uniq;
+}
+
+$('dbfile').onchange = async e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  prepareDB(JSON.parse(await f.text()));
+  localStorage.setItem('pdd_db', JSON.stringify(DB.map(({set, ...r}) => r)));
+  setStatus('Вопросов в базе: ' + DB.length);
+};
+
+try {
+  const saved = localStorage.getItem('pdd_db');
+  if (saved) { prepareDB(JSON.parse(saved)); setStatus('Вопросов в базе: ' + DB.length); }
+} catch (e) {}
+
+async function loop() {
+  const video = $('video'), canvas = $('canvas');
+  if (!busy && video.videoWidth) {
+    busy = true;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    canvas.getContext('2d').drawImage(video, 0, 0);
+    try {
+      const { data } = await worker.recognize(canvas);
+      const res = findBest(data.text);
+      if (res) {
+        if (res.length === 1) {
+          const it = res[0].item;
+          $('answer').textContent = '✔ ' + it.answers[it.correct];
+          $('q').textContent = it.question + ' [' + it.id + '] (совпадение ' + Math.round(res[0].score * 100) + '%)';
+        } else {
+          // неоднозначно: вопрос с таким текстом встречается с разными картинками
+          $('answer').textContent = '⚠ Варианты (смотри по картинке): ' +
+            res.map(x => x.item.answers[x.item.correct]).join('  ИЛИ  ');
+          $('q').textContent = res[0].item.question;
+        }
+      }
+    } catch (e) { setStatus('Ошибка OCR: ' + e.message); }
+    busy = false;
+  }
+  setTimeout(loop, 300);
+}
+
+$('start').onclick = async () => {
+  if (!DB.length) { setStatus('Сначала загрузи questions.json'); return; }
+  setStatus('Загружаю распознавание текста...');
+  worker = await Tesseract.createWorker('rus');
+  const stream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: 'environment' }
+  });
+  $('video').srcObject = stream;
+  await $('video').play();
+  setStatus('Работает. Вопросов в базе: ' + DB.length);
+  loop();
+};
+</script>
+</body>
+</html>
